@@ -26,22 +26,22 @@ class Results():
 
         self.fees = ((self.buy_turnover - self.sell_turnover) * 1e2 * self.config["SLIPPAGE_PER_TRADE_BPS"] * 1e-4) / self.config["N_MAX_PORTFOLIO"]
         self.returns = self.returns_raw - self.fees
+        # self.returns = 1 * (self.returns * (2/3) +  self.index_returns * (1/3))
 
-        self.feature_names = ["momo", "momo2", "momo3", "momo4", "v_momo", "v_momo2", "daily_return", \
-                                "vol", "daily_hl", "hl_vol", \
-                                "drawdown_1yr", "drawup_1yr", "drawdown_ath", \
-                                "index_corr", "index_corr_med", "index_return", "index_momo", "index_momo_corr", \
-                                "index_drawdown_1yr", "index_drawup_1yr", "index_drawdown_ath"]
-
+        self.feature_names = model.features.feature_names
 
 
     def plotReturns(self):
-        _, ax = plt.subplots(nrows=5, ncols=1, sharex=True, figsize=(15,30))
+
+        _, ax = plt.subplots(nrows=5, ncols=1, sharex=True, figsize=(15,40))
 
         ax[0].plot(self.returns.cumsum())
         ax[0].plot(self.fees.cumsum())
         ax[0].plot(self.index_returns.cumsum())
         ax[0].axhline(0, color='grey', linestyle='--', alpha=0.5)
+        ax0a = ax[0].twinx()
+        ax0a.sharey(ax[0])
+        (self.returns.cumsum() - self.index_returns.cumsum()).plot(ax=ax0a, color='r')
 
         ax[1].plot((self.n_buy_positions + self.n_sell_positions))
         ax[1].axhline(0, color='grey', linestyle='--', alpha=0.5)
@@ -55,6 +55,7 @@ class Results():
         ax[3].axhline(0, color='grey', linestyle='--', alpha=0.5)
 
         (self.returns.cumsum().cummax() - self.returns.cumsum()).plot(ax=ax[4])
+        (self.index_returns.cumsum().cummax() - self.index_returns.cumsum()).plot(ax=ax[4])
         plt.show()
 
         ## print out
@@ -65,6 +66,12 @@ class Results():
         print("{:.2f}% above index".format(total_return - index_return, n_years))
         print("{:.2f}% CAGR".format((pow(1 + total_return / 100, 1/n_years) - 1) * 100))
         print("{:.2f}% index CAGR".format((pow(1 + index_return / 100, 1/n_years) - 1) * 100))
+        print("")
+        print("total sharpe: {}".format(self.returns.cumsum()[-1] / (self.returns.std() * np.sqrt(len(self.returns)))))
+        print("index sharpe: {}".format(self.index_returns.cumsum()[-1] / (self.index_returns.std() * np.sqrt(len(self.index_returns)))))
+        print("total sortino: {}".format(self.returns.cumsum()[-1] / (self.returns[self.returns < 0].std() * np.sqrt(len(self.returns[self.returns < 0])))))
+        print("index sortino: {}".format(self.index_returns.cumsum()[-1] / (self.index_returns[self.index_returns < 0].std() * np.sqrt(len(self.index_returns[self.index_returns < 0])))))
+        print("")
 
         ldd = 0
         cdd = 0
@@ -73,7 +80,8 @@ class Results():
             cdd = cdd + 1 if r else 0
             ldd = cdd if cdd > ldd else ldd
 
-        print("longest drawdown (days): " + str(ldd))
+        print("longest drawdown (days): " + str(ldd))   
+        print("")
 
 
     def plotSharpe(self, freq='Y', scale=250):
@@ -83,7 +91,7 @@ class Results():
         yearly_sharpe = yearly_sharpe[np.isfinite(yearly_sharpe)]
         (yearly_sharpe).plot.bar(figsize=(10,5))
         plt.axhline(yearly_sharpe.mean(), color='r', linestyle='--', alpha=0.7)
-        print(yearly_sharpe.mean())
+        print("average {} sharpe: {}".format(freq, yearly_sharpe.mean()))
         plt.show()
 
     def returnCorrelation(self, freq=None):
@@ -116,11 +124,11 @@ class Results():
 
     def plotPricePaths(self):
         ## CALC PRICEPATHS
-        opens =  self.data_raw["Open"]
-        closes =  self.data_raw["Close"]
-        highs =  self.data_raw["High"]
-        lows =  self.data_raw["Low"]
-        vols = self.model.sb_FL[0].vol
+        opens =  self.model.features.opens
+        closes =  self.model.features.closes
+        highs =  self.model.features.highs
+        lows =  self.model.features.lows
+        vols = self.model.features.vol
 
         opens = opens.set_index(pd.to_datetime(opens.index))
         closes = closes.set_index(pd.to_datetime(closes.index))
@@ -266,7 +274,7 @@ class Results():
 
         trades = self.trader.buy_trades.trades + self.trader.sell_trades.trades
 
-        trades_df = pd.DataFrame([{"ticker": ticker_names[t.ord], 
+        self.trades_df = pd.DataFrame([{"ticker": ticker_names[t.ord], 
                                 "side": t.side, 
                                 "open": t.marks[0], 
                                 "open_date": t.dates[0], 
@@ -275,31 +283,38 @@ class Results():
                                 "close_date": t.dates[-1], 
                                 "age": (t.dates[-1] - t.dates[0]).days,
                                 "prob": self.prob_bins[np.digitize(t.prob, self.prob_bins) - 1],
-                                "type": t.levels[-1]} for t in trades]) #.set_index("close_date")
+                                "type": t.levels[-1],
+                                "vol": t.vol,
+                                "adv": t.adv} for t in trades]) #.set_index("close_date")
 
-        grouped_df = trades_df.groupby(["type", "prob"])["ret"].agg({'sum', 'median', 'mean', 'count'})\
-                                .join(trades_df.groupby(["type", "prob"])["age"].agg({'mean'}), on=["type","prob"], rsuffix="_age")\
+        grouped_df = self.trades_df.groupby(["type", "prob", "side"])["ret"].agg({'sum', 'median', 'mean', 'count'})\
+                                .join(self.trades_df.groupby(["type", "prob", "side"])["age"].agg({'mean'}), on=["type","prob","side"], rsuffix="_age")\
                                 .assign(fees = lambda x: x["count"] * self.config["SLIPPAGE_PER_TRADE_BPS"] * 1e-4 * 1e2 / n_max_portfolio)
 
         print(grouped_df)
         #plt.plot(trades_df.index, trades_df["ret"].cumsum()) 
         #trades_df.groupby(["type"]).apply(lambda x: (x.close_date - x.open_date).mean())
 
+
+        # (res.trades_df.join(pd.qcut(res.trades_df.vol, q=10).rename("vol_bucket")).groupby(["vol_bucket", "side", "prob"])["ret"].agg({'mean'}).unstack(level=1) * 100).style.background_gradient(cmap='RdBu', vmax=10, vmin=-5)
+        # (res.trades_df.join(pd.qcut(1e-6 * res.trades_df.adv, q=10).rename("adv_bucket")).groupby(["adv_bucket", "side", "prob"])["ret"].agg({'mean'}).unstack(level=1) * 100).style.background_gradient(cmap='RdBu', vmax=10, vmin=-5)
+
+
     def plotFeaturesByTicker(self, ticker_name):
         ## PLOT FEATURES BY TICKER
-        n_features = len(self.model.sb_FL[0].features)
+        n_features = len(self.model.features.features)
 
         _, ax = plt.subplots(n_features, 1, sharex=True, figsize=(15, n_features * 4))
 
         for i in range(n_features):
-            self.model.sb_FL[0].features[i][ticker_name].plot(ax=ax[i], label=self.feature_names[i])
+            self.model.features.features[i][ticker_name].plot(ax=ax[i], label=self.feature_names[i])
             ax[i].axhline(0, linestyle='--', color='grey', alpha=0.5)
             ax[i].legend(loc='upper left')
         plt.show()
 
 
     def plotFeatures(self):
-        n_features = len(self.model.sb_FL[0].features)
+        n_features = len(self.model.features.features)
         n_splits = self.config["N_SPLITS"]
 
         ## CALC FEATURE COEFS
@@ -309,14 +324,14 @@ class Results():
 
         feature_coefs = np.zeros((n_features, 2, n_splits)) * np.nan
 
-        i = 0 # use training data
-
         for j in range(2):
             for k in range(n_splits):
-                if type(self.model.models[i][j][k]) is RandomForestClassifier:
-                    coefs = self.model.models[i][j][k].feature_importances_[0] * self.model.Xyw[i][j][k][0].std(axis=0) 
-                else:
-                    coefs = self.model.models[i][j][k].coef_[0] * self.model.Xyw[i][j][k][0].std(axis=0) 
+                # if type(self.model.models[j][k]) is RandomForestClassifier:
+                #     coefs = self.model.models[j][k].feature_importances_[0] * self.model.Xyw[i][j][k][0].std(axis=0) 
+                # else:
+                #     coefs = self.model.models[i][j][k].coef_[0] * self.model.Xyw[i][j][k][0].std(axis=0) 
+
+                coefs = self.model.models[j][k].coef_[0] * self.model.Xyw[0][j][k][0].std(axis=0) 
 
                 n_coefs = len(coefs)
                 ord_map = features_11_ord_map if n_coefs == 11 else \
@@ -344,7 +359,7 @@ class Results():
         feature_return_corrs = dict()
 
         for f in range(n_features):
-                ff = self.model.sb_FL[0].features[f]
+                ff = self.model.features.features[f]
                 feature_return_corrs[self.feature_names[f]] = {q: ff.quantile(q, axis=1).corr(self.returns) for q in quantile_list}
         print(pd.DataFrame.from_dict(feature_return_corrs))
 
@@ -352,7 +367,7 @@ class Results():
         feature_return_corrs = dict()
 
         for f in range(n_features):
-                ff = self.model.sb_FL[0].features[f].corrwith(self.returns)
+                ff = self.model.features.features[f].corrwith(self.returns)
                 feature_return_corrs[self.feature_names[f]] = {q: np.nanquantile(ff, q) for q in quantile_list}
 
         print(pd.DataFrame.from_dict(feature_return_corrs))
