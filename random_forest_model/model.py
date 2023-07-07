@@ -18,28 +18,27 @@ class Model():
     def __init__(self, unfit_model, config, data_raw, folder_path):
 
         # allow features to burn in before trading start date
-        self.data_raw = data_raw.loc[pd.Timestamp(config["TRADING_START_DATE"]):]
+        self.trading_data = data_raw.loc[pd.Timestamp(config["TRADING_START_DATE"]):]
 
-        self.config = self.processConfig(config, self.data_raw, unfit_model, folder_path)
+        self.config = self.processConfig(config, self.trading_data, unfit_model, folder_path)
         
         self.unfit_model = unfit_model
         self.last_fit_models = np.zeros((2,), dtype=object)
 
-        # train/test | split_i |
-        self.ixs = np.zeros((2, self.config["N_SPLITS"], ), dtype=object)
-
         # sell/buy | split_i
-        self.coefs = np.zeros((2, self.config["N_SPLITS"]), dtype = object)
+        self.coefs = [[],[]]
 
         self.features = Features(self.config, data_raw)
         
         # sell/buy
-        self.labels = [Labels(self.config, self.features, self.data_raw, is_buying=False), 
-                       Labels(self.config, self.features, self.data_raw, is_buying=True)]
+        self.labels = [Labels(self.config, self.features, self.trading_data, is_buying=False), 
+                       Labels(self.config, self.features, self.trading_data, is_buying=True)]
 
 
-    def processConfig(self, config, data_raw, unfit_model, folder_path):
-        config["N_SPLITS"] = int((len(data_raw) - config["TRAIN_SIZE"]) / config["TEST_SIZE"]) 
+    def processConfig(self, config, trading_data, unfit_model, folder_path):
+        config["TICKER_NAMES"] = trading_data["Close"].columns.drop(config["INDEX_NAME"])
+
+        config["N_SPLITS"] = int((len(trading_data) - (config["TRAIN_SIZE"] + config["DAYS_TIL_UPSIDE"])) / config["TEST_SIZE"]) 
         config["UNFIT_MODEL"] = unfit_model
         config["FOLDER_PATH"] = folder_path
         
@@ -55,42 +54,41 @@ class Model():
 
     def train(self):
 
-        tscv = TimeSeriesSplit(n_splits=self.config["N_SPLITS"], max_train_size=self.config["TRAIN_SIZE"], test_size=self.config["TEST_SIZE"])
-
-        k = 0
-        for train, test in tscv.split(self.data_raw):   
-            self.ixs[0][k] = self.data_raw.index[train[0]:train[0] + self.config["TRAIN_SIZE"]]
-            self.ixs[1][k] = self.data_raw.index[test[0]:test[0] + self.config["TEST_SIZE"]]
-            k = k + 1
-
-        # sell/buy
+        tscv = TimeSeriesSplit(n_splits=self.config["N_SPLITS"], 
+                               max_train_size=self.config["TRAIN_SIZE"], 
+                               test_size=self.config["TEST_SIZE"], 
+                               gap=self.config["DAYS_TIL_UPSIDE"])
 
         self.sell_probs = pd.DataFrame()
         self.buy_probs = pd.DataFrame()
+        
+        for k, train_test_ixs in enumerate(tscv.split(self.trading_data)):   
+            train_ixs = self.trading_data.index[train_test_ixs[0][0]:train_test_ixs[0][0] + self.config["TRAIN_SIZE"]]
+            test_ixs = self.trading_data.index[train_test_ixs[1][0]:train_test_ixs[1][0] + self.config["TEST_SIZE"]]
 
-        for k in range(self.config["N_SPLITS"]): 
             print("fitting fold {} of {}".format(k, self.config["N_SPLITS"]))
             
             fit_models = [deepcopy(self.unfit_model), deepcopy(self.unfit_model)]
             features_to_mask = np.zeros((2, ), dtype=object)
             
             for j in range(2):      
-                X, y, _, features_to_mask[j] = self.labels[j].getXyw(self.ixs[0][k]) #type: ignore
+                X, y, _, features_to_mask[j] = self.labels[j].getXyw(train_ixs) #type: ignore
         
                 if y.any():
                     fit_models[j].fit(X, y)
                     del(X, y,)
 
             # out-of-sample: predictions on test-data, made by models fit to training-data, mask features based on training-data
-            s_probs = self.labels[0].getPredictionsByTicker(fit_models[0], self.ixs[1][k], features_to_mask[0])  #type: ignore
-            b_probs = self.labels[1].getPredictionsByTicker(fit_models[1], self.ixs[1][k], features_to_mask[1])  #type: ignore
+            s_probs = self.labels[0].getPredictionsByTicker(fit_models[0], test_ixs, features_to_mask[0])  #type: ignore
+            b_probs = self.labels[1].getPredictionsByTicker(fit_models[1], test_ixs, features_to_mask[1])  #type: ignore
 
             self.sell_probs = pd.concat([self.sell_probs, s_probs])
             self.buy_probs = pd.concat([self.buy_probs, b_probs])
-            del(s_probs, b_probs, features_to_mask) #type: ignore
+            
+            del(s_probs, b_probs, features_to_mask, train_ixs, test_ixs) #type: ignore
 
-            self.coefs[0][k] = fit_models[0].feature_importances_
-            self.coefs[1][k] = fit_models[1].feature_importances_
+            self.coefs[0].append(fit_models[0].feature_importances_)
+            self.coefs[1].append(fit_models[1].feature_importances_)
 
             if k < self.config["N_SPLITS"] - 1:
                 del(fit_models)
@@ -110,7 +108,7 @@ class Model():
         file_path = self.config["FOLDER_PATH"] + '{}.pkl'.format(timestamp)
 
         with open(file_path, 'wb') as file:
-            pickle.dump((self.config, self.ixs, 
+            pickle.dump((self.config,
                          self.last_fit_models[0], self.last_fit_models[1], 
                          np.array(self.coefs), 
                          self.sell_probs, self.buy_probs), file)
@@ -127,7 +125,7 @@ class Model():
             if return_list:
                 return pickle.load(file)
             else:         
-                self.config, self.ixs, self.last_fit_models[0], self.last_fit_models[1], self.coefs, self.sell_probs, self.buy_probs = pickle.load(file)                
+                self.config, self.last_fit_models[0], self.last_fit_models[1], self.coefs, self.sell_probs, self.buy_probs = pickle.load(file)                
 
 
     def getFeatureLabelCorrelations(self):

@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from copy import deepcopy
 
 
 class Trader():
@@ -21,18 +22,24 @@ class Trader():
 
     def getTrades(self, is_buying, n_max_portfolio, conf=None, upside_mult = 1.0, downside_mult = 1.0, window_mult = 1.0):
 
-        print({"is_buying": is_buying, "conf": conf, "allow_early_unwind": self.config["ALLOW_EARLY_UNDWIND"], "adv_cutoff_percentile": self.config["ADV_CUTOFF_PERCENTILE"]})
+        print({"is_buying": is_buying, "conf": conf, "allow_early_unwind": self.config["ALLOW_EARLY_UNDWIND"], "adv_cutoff": self.config["ADV_CUTOFF"]})
+
+        if conf == None:
+            conf = 0.5
 
         if is_buying:
             side = 1.0 
-            probs = self.model.buy_probs
+            probs = deepcopy(self.model.buy_probs)
             upside = self.config["UPSIDE"]
             downside = self.config["DOWNSIDE"]
         else:
             side = -1.0 
-            probs = self.model.sell_probs
+            probs = deepcopy(self.model.sell_probs)
             upside = self.config["DOWNSIDE"]
             downside = self.config["UPSIDE"]
+
+        probs = probs.reindex(columns=self.config["TICKER_NAMES"])
+        cols = probs.columns
 
         ix = probs.index
         n_days = len(ix)
@@ -40,28 +47,29 @@ class Trader():
         upside_target = (self.opens * (1 + self.vol.shift(1) * upside * 1e-2 * upside_mult)).loc[ix].to_numpy()
         downside_target = (self.opens * (1 - self.vol.shift(1) * downside * 1e-2 * downside_mult)).loc[ix].to_numpy()
 
-        if conf == None:
-            conf = 0.5
+        adv_mask = self.model.features.adv.rank(axis=1).apply(lambda x:  x/(~x.isna()).sum(), axis=1) > self.config["ADV_CUTOFF"]
+        
+        probs = probs.where(adv_mask, other=0)
 
-        adv_mask = self.model.features.adv.rank(axis=1).apply(lambda x:  x/(~x.isna()).sum(), axis=1) > self.config["ADV_CUTOFF_PERCENTILE"]
-            
-        signal = probs[adv_mask].gt(conf, axis=0)
+        signal = probs.gt(conf, axis=0)
 
         signalWindow = SignalWindow(signal, window_mult, self.config["DAYS_TIL_UPSIDE"]) # not shifted! for simpler indexing later
         
         # signal fires at close on day t is traded at open on day t+1 => shift signals to align with ohlc
         signal = signal.shift(1).to_numpy()
         probs = probs.shift(1).to_numpy()
-        vol = self.vol.shift(1).loc[ix].to_numpy()
-        adv = self.model.features.adv.shift(1).loc[ix].to_numpy()
 
         opens = self.opens.loc[ix].to_numpy()
         highs = self.highs.loc[ix].to_numpy()
         lows = self.lows.loc[ix].to_numpy()
         closes = self.closes.loc[ix].to_numpy()
+
+        # only used for logging at this point
+        vol = self.vol.shift(1).loc[ix].to_numpy()
+        adv = self.model.features.adv.shift(1).loc[ix].to_numpy()
         
         portfolio = Portfolio(allow_early_unwind = self.config["ALLOW_EARLY_UNDWIND"])
-        self.closed_trades = Blotter(ix, self.config["TICKER_NAMES"])
+        self.closed_trades = Blotter(ix, cols)
 
         def closePosition(p, rate, i, level, is_early_close=False):
             p.mark(rate, ix[i], level)
@@ -127,6 +135,7 @@ class Blotter():
     def getReturns(self, aggregated=True):
         df = pd.DataFrame(index=self.ix)
         for i, p in enumerate(self.trades):
+            # print("rtn {} has {} dates".format(i, len(p.dates)))
             col_name = "{}_{}".format(self.ticker_names[p.ord], i)
             new = df.join(pd.DataFrame({col_name: np.diff(sr(p.marks[0], p.marks[1:]), prepend=0) * p.side}, index=p.dates[1:]))
             df = new
@@ -137,6 +146,7 @@ class Blotter():
     def getPositions(self, aggregated=True):
         df = pd.DataFrame(index=self.ix)
         for i, p in enumerate(self.trades):
+            # print("psn {} has {} dates".format(i, len(p.dates)))
             col_name = "{}_{}".format(self.ticker_names[p.ord], i)
             new = df.join(pd.DataFrame({col_name: (np.array(p.levels[1:]) != "EARLY") * p.side}, index=p.dates[1:]))
             df = new
@@ -147,6 +157,7 @@ class Blotter():
     def getTurnover(self, aggregated=True):
         df = pd.DataFrame(index=self.ix)
         for i, p in enumerate(self.trades):
+            # print("trn {} has {} dates".format(i, len(p.dates)))
             col_name = "{}_{}".format(self.ticker_names[p.ord], i)
             df_to_join = pd.DataFrame({col_name: p.side}, index=list(set([p.dates[0],p.dates[-1]])))
             new = df.join(df_to_join)

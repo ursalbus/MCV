@@ -21,9 +21,8 @@ pd.options.mode.chained_assignment = None # default='warn' # type: ignore
 INDEX_NAME = "SPY"
 
 model_config = {"INDEX_NAME": INDEX_NAME,
-                "TICKER_NAMES": sp500_tickers + [INDEX_NAME], 
-                "START_DATE": "2016-01-01", 
-                "TRADING_START_DATE": "2017-01-01", 
+                "START_DATE": "2018-01-01", 
+                "TRADING_START_DATE": "2019-01-01", 
                 "END_DATE": "2023-07-01", 
                 "DAYS_TIL_UPSIDE": 60, 
                 "DAYS_MA_FAST": 5,
@@ -32,7 +31,7 @@ model_config = {"INDEX_NAME": INDEX_NAME,
 
 #%% 
 ## PULL DATA
-data_raw = yf.download(model_config["TICKER_NAMES"], 
+data_raw = yf.download(sp500_tickers + [INDEX_NAME], 
                        start=model_config["START_DATE"], 
                        end=model_config["END_DATE"], 
                        interval = "1d")
@@ -65,7 +64,7 @@ rfc_model = Model(RandomForestClassifier(n_estimators=100, n_jobs=-1), model_con
 
 rfc_model.train()
 
-## TRY TO SAVE
+#TRY TO SAVE
 try:
     model_path = rfc_model.save()
 except:
@@ -93,7 +92,7 @@ import trader
 importlib.reload(trader)
 from trader import Trader
 
-trader_config = {"N_MAX_PORTFOLIO": 100, "SELL_CONF": 0.5, "BUY_CONF": 0.5, "ADV_CUTOFF_PERCENTILE": 0.20, "ALLOW_EARLY_UNDWIND": False}
+trader_config = {"N_MAX_PORTFOLIO": 100, "SELL_CONF": 0.5, "BUY_CONF": 0.5, "ADV_CUTOFF": 0.2, "ALLOW_EARLY_UNDWIND": False}
 rfc_trader = Trader(trader_config, rfc_model)
 rfc_trader.trade()
 
@@ -118,7 +117,7 @@ res.plotReturns()
 res.returnCorrelation()
 res.returnCorrelation('W')
 res.returnCorrelation('M')
-
+#%%
 # res.plotSharpe('Y', 250)
 # res.plotSharpe('M', 20)
 # res.plotReturnsHistogram('W')
@@ -126,30 +125,17 @@ res.returnCorrelation('M')
 # res.tradesSummary()
 # res.plotFeaturesByTicker("AAPL")
 # res.plotFeatures()
+# res.plotCoefs
 #%%
-res.tradesSummary()
-
-#%%
-
-(res.trades_df.join(pd.qcut(res.trades_df.vol, q=5).rename("vol_bucket")).groupby(["vol_bucket", "side", "prob"])["ret"].agg({'mean'}).unstack(level=1) * 100).style.background_gradient(cmap='RdBu', vmax=10, vmin=-5)
+res.tradesSummary(True)
 
 #%%
-
-(res.trades_df.join(pd.qcut(1e-6 * res.trades_df.adv, q=5).rename("adv_bucket")).groupby(["adv_bucket", "side", "prob"])["ret"].agg({'mean'}).unstack(level=1) * 100).style.background_gradient(cmap='RdBu', vmax=10, vmin=-5)
-
+res.tradesByVol()
 
 #%%
 
-#%%
+res.tradesByAdv()
+# %%
 
 
-
-#%%
-
-#%%
-
-
-
-
-
-
+res.plotReturnsHistogram('W')

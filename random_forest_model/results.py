@@ -10,7 +10,7 @@ class Results():
         self.trader = trader
         self.model = model
 
-        self.data_raw = model.data_raw
+        self.data_raw = model.trading_data
         self.prob_bins = np.arange(0.5, 1.01, 0.1)
 
         self.returns_raw = ((trader.sell_trades.getReturns() + trader.buy_trades.getReturns()) / self.config["N_MAX_PORTFOLIO"])
@@ -268,7 +268,7 @@ class Results():
         plt.show()
 
 
-    def tradesSummary(self):
+    def tradesSummary(self, print_res=False):
         ticker_names = self.config["TICKER_NAMES"]
         n_max_portfolio = self.config["N_MAX_PORTFOLIO"]
 
@@ -291,13 +291,16 @@ class Results():
                                 .join(self.trades_df.groupby(["type", "prob", "side"])["age"].agg({'mean'}), on=["type","prob","side"], rsuffix="_age")\
                                 .assign(fees = lambda x: x["count"] * self.config["SLIPPAGE_PER_TRADE_BPS"] * 1e-4 * 1e2 / n_max_portfolio)
 
-        print(grouped_df)
+        if print_res:
+            print(grouped_df)
         #plt.plot(trades_df.index, trades_df["ret"].cumsum()) 
         #trades_df.groupby(["type"]).apply(lambda x: (x.close_date - x.open_date).mean())
 
-
-        # (res.trades_df.join(pd.qcut(res.trades_df.vol, q=10).rename("vol_bucket")).groupby(["vol_bucket", "side", "prob"])["ret"].agg({'mean'}).unstack(level=1) * 100).style.background_gradient(cmap='RdBu', vmax=10, vmin=-5)
-        # (res.trades_df.join(pd.qcut(1e-6 * res.trades_df.adv, q=10).rename("adv_bucket")).groupby(["adv_bucket", "side", "prob"])["ret"].agg({'mean'}).unstack(level=1) * 100).style.background_gradient(cmap='RdBu', vmax=10, vmin=-5)
+    def tradesByVol(self):
+        return (self.trades_df.join(pd.qcut(self.trades_df.vol, q=10).rename("vol_bucket")).groupby(["vol_bucket", "side", "prob"])["ret"].agg({'mean'}).unstack(level=1) * 100).style.background_gradient(cmap='RdBu', vmax=10, vmin=-5)
+        
+    def tradesByAdv(self):
+        return (self.trades_df.join(pd.qcut(1e-6 * self.trades_df.adv, q=10).rename("adv_bucket")).groupby(["adv_bucket", "side", "prob"])["ret"].agg({'mean'}).unstack(level=1) * 100).style.background_gradient(cmap='RdBu', vmax=10, vmin=-5)
 
 
     def plotFeaturesByTicker(self, ticker_name):
@@ -372,3 +375,20 @@ class Results():
 
         print(pd.DataFrame.from_dict(feature_return_corrs))
 
+        
+
+    def plotCoefs(self):
+
+        n_features = len(self.model.features.features)
+        n_splits = self.config["N_SPLITS"]
+
+        xaxis = self.data_raw.loc[[self.model.ixs[1][k][0] for k in range(n_splits) ]].index
+
+        ## PLOT FEATURES COEFS
+        _, ax = plt.subplots(n_features, 1, sharex=True, figsize=(15, n_features * 4))
+
+        for j in range(2):
+            for i in range(n_features):
+                ax[i].plot(xaxis, [self.model.coefs[j][k][i] for k in range(n_splits)], label=self.feature_names[i] + " | {}".format(j))
+                ax[i].legend()
+        plt.show()

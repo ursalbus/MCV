@@ -28,7 +28,7 @@ class Features():
         v_momo = self.getMomoRtns(self.volumes, self.config["DAYS_MA_FAST"], self.config["DAYS_MA_SLOW"])
         v_momo2 = self.getMomoRtns(self.volumes, 1, self.config["DAYS_MA_SLOW"])
 
-        self.adv = (self.volumes * self.closes).rolling(20).mean() 
+        self.adv = (self.volumes * self.closes).rolling(20, min_periods=1).mean() 
 
         daily_return = lr(self.closes / self.closes.shift(1))
         daily_hl = lr(self.highs / self.lows)
@@ -53,6 +53,7 @@ class Features():
 
         rank_momo = self.wideRank(momo)
         rank_v_momo = self.wideRank(momo)
+        rank_adv = self.wideRank(self.adv)
         rank_daily_ret = self.wideRank(momo)
         rank_drawdown_1yr = self.wideRank(drawdown_1yr)
         rank_drawdown_ath = self.wideRank(drawdown_ath)
@@ -63,18 +64,20 @@ class Features():
                                 "drawdown_1yr", "drawup_1yr", "drawdown_ath", \
                                 "index_corr", "index_corr_med", "index_return", "index_momo", "index_momo_corr", \
                                 "index_drawdown_1yr", "index_drawup_1yr", "index_drawdown_ath", \
-                                "rank_momo", "rank_v_momo", "rank_daily_ret", "rank_drawdown_1yr", "rank_drawdown_ath", "rank_drawup_1yr"]
+                                "rank_momo", "rank_v_momo", "rank_adv", "rank_daily_ret", "rank_drawdown_1yr", "rank_drawdown_ath", "rank_drawup_1yr"]
                 
         feaures_list = [momo, momo2, momo3, momo4, v_momo, v_momo2, daily_return, \
                         vol, daily_hl, hl_vol, \
                         drawdown_1yr, drawup_1yr, drawdown_ath,
                         index_corr, index_corr_med, index_return, index_momo, index_momo_corr, \
                         index_drawdown_1yr, index_drawup_1yr, index_drawdown_ath,
-                        rank_momo, rank_v_momo, rank_daily_ret, rank_drawdown_1yr, rank_drawdown_ath, rank_drawup_1yr]
+                        rank_momo, rank_v_momo, rank_adv, rank_daily_ret, rank_drawdown_1yr, rank_drawdown_ath, rank_drawup_1yr]
         
         for f in feaures_list:
             f[np.isinf(f)] = np.nan
             f.fillna(0)
+            if f.shape[1] > self.n_tickers:
+                f.drop(self.config["INDEX_NAME"], axis=1, inplace=True)
 
         return feaures_list
         
@@ -119,7 +122,7 @@ class Labels():
     def getLabels(self):
         self.opens[self.opens == 0.0] = np.nan
 
-        ud = {s: getUpsideDownside(self.opens[s].values, 
+        ud = {s: getUpsideDownside1(self.opens[s].values, 
                                    self.highs[s].values, 
                                    self.lows[s].values, 
                                    self.closes[s].values, 
@@ -142,17 +145,19 @@ class Labels():
         self.weights = (~self.has_expired * ((labels * self.vol * self.upside) + \
                                         ((~labels * ~self.has_expired) * self.vol * self.downside * -1))) + \
                        (self.has_expired * self.forward_expired_rtn)
+        
+        self.weights.drop(self.config["INDEX_NAME"], axis=1, inplace=True)
 
         return labels
     
     def getXyw(self, ixs):
-        labels = self.labels.loc[ixs].drop(self.config["INDEX_NAME"], axis=1).to_numpy()
-        weights = self.weights.loc[ixs].drop(self.config["INDEX_NAME"], axis=1).fillna(0).to_numpy()
-        d = (self.closes.loc[ixs].drop(self.config["INDEX_NAME"], axis=1).size, 1)
+        labels = self.labels.loc[ixs].to_numpy()
+        weights = self.weights.loc[ixs].fillna(0).to_numpy()
+        d = len(labels) * len(labels[0])
 
         nan_features = [f.loc[ixs].isna().all().all() for f in self.features]
-        features = [self.features[i].loc[ixs] for i in range(len(self.features)) if ~nan_features[i]]
-        features = [f.drop(self.config["INDEX_NAME"], axis=1).to_numpy() for f in features]
+        features = [f.loc[ixs] for i, f in enumerate(self.features) if ~nan_features[i]]
+        features = [f.to_numpy() for f in features]
 
         X, y, w = self.njitGetXyw(features, labels, weights, d)
 
@@ -161,11 +166,11 @@ class Labels():
     # @njit
     def njitGetXyw(self, features, labels, weights, d):
 
-        y = np.reshape(labels, (d[0],))
-        w = np.reshape(weights, (d[0],))
-        xs = [np.reshape(f, d) for f in features]
+        y = np.reshape(labels, (d,))
+        w = np.reshape(weights, (d,))
+        xs = [np.reshape(f, (d, 1)) for f in features]
         X = np.hstack(xs)
-        
+                
         mask = ~(np.isnan(X).any(axis=1) | np.isinf(X).any(axis=1))
 
         return X[mask], y[mask], w[mask]
@@ -173,7 +178,7 @@ class Labels():
 
     def getPredictionsByTicker(self, model, ixs, features_to_mask):
         X = self.getFeaturesByTicker(ixs, features_to_mask)
-        dummy = pd.DataFrame({"d": self.closes.loc[ixs].iloc[:,0]}) * np.nan
+        dummy = pd.DataFrame({"dummy": self.closes.loc[ixs].iloc[:,0]}) * np.nan
         
         return pd.DataFrame.from_dict({s: self.safePredict(model, X[s], ixs, dummy) for s in self.ticker_names}).set_index(ixs)
     
@@ -185,7 +190,7 @@ class Labels():
         mask = ~np.isnan(X).any(axis=1) & ~np.isinf(X).any(axis=1)
 
         if sum(mask) == 0:
-            return dummy["d"] #np.full(len(ix), np.nan)
+            return dummy["dummy"] #np.full(len(ix), np.nan)
         
         # 0th column is 0th class = prob label is false | 1st column is 1st class = prob label is true 
         pred = pd.DataFrame({"p": model.predict_proba(X[mask])[:,1]}, index=ixs[mask])
@@ -201,13 +206,42 @@ def lr(x):
 def sr(o, c):
     return 1e2 * (c - o) / o
 
-# @njit
+@njit
 def getUpsideDownside(o, h, l, c, v, us, ds, dtu_max):
+    n = len(h) 
+
+    max_idx = [min([n-1, i+dtu_max]) for i in range(n)]
+
+    window_high_rtn = [1e2 * np.log(h[i:max_idx[i]] / o[i]) for i in range(n)]
+    upside_target_rtn = [np.nan] + [v[i-1] * us for i in range(1,n)]
+    is_upside = [window_high_rtn[i] > upside_target_rtn[i] for i in range(n)]
+    has_upside = [(is_upside[i]).any() for i in range(n)]
+    dtu = [np.nonzero(is_upside[i])[0] + 1 for i in range(n)]
+    days_to_upside = [dtu[i][0] if len(dtu[i]) > 0 else np.NaN for i in range(n)]
+
+    window_low_rtn = [1e2 * np.log(l[i:max_idx[i]] / o[i]) for i in range(n)]
+    downside_target_rtn = [np.nan] + [v[i-1] * ds for i in range(1,n)]
+    is_downside = [window_low_rtn[i] < -1 * downside_target_rtn[i] for i in range(n)]
+    has_downside = [(is_downside[i]).any() for i in range(n)]
+    dtd = [np.nonzero(is_downside[i])[0] + 1 for i in range(n)]
+    days_to_downside = [dtd[i][0] if len(dtd[i]) > 0 else np.NaN for i in range(n)]
+
+    expired_rtn = [1e2*np.log(c[max_idx[i]] / o[i]) for i in range(n)]
+
+    if us > ds:
+        return has_upside, has_downside, days_to_upside, days_to_downside, expired_rtn
+    else:
+        return has_downside, has_upside, days_to_downside, days_to_upside, expired_rtn
+
+
+@njit
+def getUpsideDownside1(o, h, l, c, v, us, ds, dtu_max):
     n = len(h) 
 
     # use +1 here so we can use range(1,n) below, could equally do +0 here and range(1,n-1) below.
     max_idx = [min([n-1, i+dtu_max+1]) for i in range(n)]
 
+    
     is_upside = [np.array([False]*n)] + [1e2*np.log(h[i+1:max_idx[i]] / o[i]) > v[i-1] * us for i in range(1,n)]
     has_upside = [(is_upside[i]).any() for i in range(n)]
     dtu = [np.nonzero(is_upside[i])[0] + 1 for i in range(n)]
